@@ -1,0 +1,101 @@
+
+name: Build HAKO EVENTS APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Recuperer le depot
+        uses: actions/checkout@v4
+
+      - name: Installer Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Installer Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Extraire le ZIP
+        run: |
+          set -e
+          ZIP_FILE=$(find . -maxdepth 1 -type f -iname '*.zip' | head -n 1)
+          test -n "$ZIP_FILE"
+          mkdir source
+          unzip -q "$ZIP_FILE" -d source
+          test -s source/index.html
+
+      - name: Installer les outils
+        run: |
+          npm install -g cordova@13.0.0
+          npm install --no-save @supabase/supabase-js esbuild
+          echo "import { createClient } from '@supabase/supabase-js'; window.supabase = { createClient };" > supabase-entry.js
+
+      - name: Creer le projet Android
+        run: |
+          cordova create hako-build com.soumbil.hakoevents "HAKO EVENTS"
+          cp source/index.html hako-build/www/index.html
+          npx esbuild supabase-entry.js --bundle --format=iife --platform=browser --outfile=hako-build/www/supabase-local.js
+
+      - name: Configurer Supabase et le logo
+        run: |
+          python3 - <<'PY'
+          import re, base64, pathlib
+          f = pathlib.Path('hako-build/www/index.html')
+          s = f.read_text(encoding='utf-8')
+          pattern = r'<script\s+src=["\']https://cdn\.jsdelivr\.net/npm/@supabase/supabase-js@2["\']\s*>\s*</script>'
+          s, n = re.subn(pattern, '<script src="supabase-local.js"></script>', s, count=1)
+          if n != 1:
+              raise SystemExit("Script Supabase introuvable : compilation arretee.")
+          f.write_text(s, encoding='utf-8')
+          m = re.search(r"const LOGO='data:image/png;base64,([^']+)'", s)
+          if not m:
+              raise SystemExit("Logo integre introuvable.")
+          icon = pathlib.Path('hako-build/res/icon.png')
+          icon.parent.mkdir(parents=True, exist_ok=True)
+          icon.write_bytes(base64.b64decode(m.group(1)))
+          PY
+
+      - name: Configurer Android
+        run: |
+          cat > hako-build/config.xml <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <widget id="com.soumbil.hakoevents" version="1.0.2"
+            xmlns="http://www.w3.org/ns/widgets"
+            xmlns:cdv="http://cordova.apache.org/ns/1.0">
+            <name>HAKO EVENTS</name>
+            <description>Evenements et billetterie au Burkina Faso</description>
+            <content src="index.html"/>
+            <access origin="*"/>
+            <allow-navigation href="*"/>
+            <allow-intent href="http://*/*"/>
+            <allow-intent href="https://*/*"/>
+            <preference name="AndroidXEnabled" value="true"/>
+            <platform name="android">
+              <icon src="res/icon.png"/>
+            </platform>
+          </widget>
+          EOF
+          cd hako-build
+          cordova platform add android@15.1.0
+          cordova build android --debug
+
+      - name: Publier le APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: HAKO-EVENTS-APK-TEST
+          path: hako-build/platforms/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          
